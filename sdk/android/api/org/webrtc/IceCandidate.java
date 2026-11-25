@@ -27,8 +27,9 @@ public class IceCandidate {
 
   /**
    * The ICE username fragment (ufrag) of the ICE generation the candidate belongs to, as
-   * {@code usernameFragment} in the web API. It changes with every ICE restart. Null when the
-   * candidate does not name one.
+   * {@code usernameFragment} in the web API. It changes with every ICE restart. Set on candidates
+   * the peer connection reports. Null when such a candidate names none, and for a candidate
+   * created from an SDP line.
    */
   @Nullable public final String usernameFragment;
 
@@ -38,7 +39,7 @@ public class IceCandidate {
     this.sdp = sdp;
     this.serverUrl = "";
     this.adapterType = PeerConnection.AdapterType.UNKNOWN;
-    this.usernameFragment = usernameFragmentOf(sdp);
+    this.usernameFragment = null;
   }
 
   @CalledByNative
@@ -51,21 +52,6 @@ public class IceCandidate {
     this.adapterType = adapterType;
     this.usernameFragment =
         usernameFragment == null || usernameFragment.isEmpty() ? null : usernameFragment;
-  }
-
-  /** Reads the fragment from a candidate line, which names it as {@code ufrag <value>}. */
-  @Nullable
-  private static String usernameFragmentOf(@Nullable String sdp) {
-    if (sdp == null) {
-      return null;
-    }
-    String[] tokens = sdp.trim().split("\\s+");
-    for (int i = 0; i + 1 < tokens.length; i++) {
-      if (tokens[i].equals("ufrag")) {
-        return tokens[i + 1];
-      }
-    }
-    return null;
   }
 
   @Override

@@ -51,18 +51,24 @@ public class IceCandidateTest {
   }
 
   @Test
-  public void testUsernameFragmentIsReadFromTheCandidateLine() {
-    IceCandidate candidate = new IceCandidate("audio", 0,
-        "candidate:1532086002 1 udp 2122194687 192.168.86.144 37138 typ host generation 1 ufrag"
-            + " AbCd network-id 1");
+  public void testUsernameFragmentOfACandidateFromNative() {
+    String sdp = "candidate:1532086002 1 udp 2122194687 192.168.86.144 37138 typ host";
 
-    assertThat(candidate.usernameFragment).isEqualTo("AbCd");
+    IceCandidate named = new IceCandidate(
+        "audio", 0, sdp, "" /* serverUrl */, PeerConnection.AdapterType.UNKNOWN, "AbCd");
+    assertThat(named.usernameFragment).isEqualTo("AbCd");
+
+    // Native passes an empty string when the candidate names none.
+    IceCandidate unnamed = new IceCandidate(
+        "audio", 0, sdp, "" /* serverUrl */, PeerConnection.AdapterType.UNKNOWN, "");
+    assertThat(unnamed.usernameFragment).isNull();
   }
 
   @Test
-  public void testUsernameFragmentIsNullWhenTheCandidateHasNone() {
-    IceCandidate candidate = new IceCandidate(
-        "audio", 0, "candidate:1532086002 1 udp 2122194687 192.168.86.144 37138 typ host");
+  public void testUsernameFragmentIsNullForACandidateCreatedFromSdp() {
+    IceCandidate candidate = new IceCandidate("audio", 0,
+        "candidate:1532086002 1 udp 2122194687 192.168.86.144 37138 typ host generation 1 ufrag"
+            + " AbCd network-id 1");
 
     assertThat(candidate.usernameFragment).isNull();
   }

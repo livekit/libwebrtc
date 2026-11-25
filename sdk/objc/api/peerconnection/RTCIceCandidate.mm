@@ -15,18 +15,6 @@
 #import "base/RTCLogging.h"
 #import "helpers/NSString+StdString.h"
 
-namespace {
-
-NSString *UsernameFragmentOf(const webrtc::IceCandidate *candidate) {
-  if (!candidate) {
-    return nil;
-  }
-  const std::string &ufrag = candidate->candidate().username();
-  return ufrag.empty() ? nil : [NSString stringForStdString:ufrag];
-}
-
-}  // namespace
-
 @implementation RTC_OBJC_TYPE (RTCIceCandidate)
 
 @synthesize sdpMid = _sdpMid;
@@ -44,14 +32,6 @@ NSString *UsernameFragmentOf(const webrtc::IceCandidate *candidate) {
     _sdpMid = [sdpMid copy];
     _sdpMLineIndex = sdpMLineIndex;
     _sdp = [sdp copy];
-    // The candidate line names the fragment. A line that does not parse has
-    // none, and is reported when the candidate is used.
-    std::unique_ptr<webrtc::IceCandidate> candidate(webrtc::CreateIceCandidate(
-        _sdpMid ? _sdpMid.stdString : std::string(),
-        _sdpMLineIndex,
-        _sdp.stdString,
-        nullptr));
-    _usernameFragment = UsernameFragmentOf(candidate.get());
   }
   return self;
 }
@@ -78,7 +58,9 @@ NSString *UsernameFragmentOf(const webrtc::IceCandidate *candidate) {
                  sdpMid:[NSString stringForStdString:candidate->sdp_mid()]];
   rtcCandidate->_serverUrl =
       [NSString stringForStdString:candidate->server_url()];
-  rtcCandidate->_usernameFragment = UsernameFragmentOf(candidate);
+  const std::string &ufrag = candidate->candidate().username();
+  rtcCandidate->_usernameFragment =
+      ufrag.empty() ? nil : [NSString stringForStdString:ufrag];
   return rtcCandidate;
 }
 
