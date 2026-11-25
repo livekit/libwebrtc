@@ -49,4 +49,21 @@ public class IceCandidateTest {
     assertThat(c1.equals(o2)).isTrue();
     assertThat(o2.equals(c1)).isTrue();
   }
+
+  @Test
+  public void testUsernameFragmentIsReadFromTheCandidateLine() {
+    IceCandidate candidate = new IceCandidate("audio", 0,
+        "candidate:1532086002 1 udp 2122194687 192.168.86.144 37138 typ host generation 1 ufrag"
+            + " AbCd network-id 1");
+
+    assertThat(candidate.usernameFragment).isEqualTo("AbCd");
+  }
+
+  @Test
+  public void testUsernameFragmentIsNullWhenTheCandidateHasNone() {
+    IceCandidate candidate = new IceCandidate(
+        "audio", 0, "candidate:1532086002 1 udp 2122194687 192.168.86.144 37138 typ host");
+
+    assertThat(candidate.usernameFragment).isNull();
+  }
 }

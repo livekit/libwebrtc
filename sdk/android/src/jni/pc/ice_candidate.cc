@@ -30,11 +30,13 @@ ScopedJavaLocalRef<jobject> CreateJavaIceCandidate(JNIEnv* env,
                                                    int sdp_mline_index,
                                                    const std::string& sdp,
                                                    const std::string server_url,
-                                                   int adapterType) {
+                                                   int adapterType,
+                                                   const std::string& ufrag) {
   return Java_IceCandidate_Constructor(
       env, NativeToJavaString(env, sdp_mid), sdp_mline_index,
       NativeToJavaString(env, sdp), NativeToJavaString(env, server_url),
-      NativeToJavaAdapterType(env, adapterType));
+      NativeToJavaAdapterType(env, adapterType),
+      NativeToJavaString(env, ufrag));
 }
 
 }  // namespace
@@ -58,7 +60,8 @@ ScopedJavaLocalRef<jobject> NativeToJavaIceCandidate(
   RTC_CHECK(!sdp.empty()) << "got an empty ICE candidate";
   // sdp_mline_index is not used, pass an invalid value -1.
   return CreateJavaIceCandidate(env, mid, -1 /* sdp_mline_index */, sdp,
-                                "" /* server_url */, candidate.network_type());
+                                "" /* server_url */, candidate.network_type(),
+                                candidate.username());
 }
 
 ScopedJavaLocalRef<jobject> NativeToJavaIceCandidate(
@@ -66,7 +69,8 @@ ScopedJavaLocalRef<jobject> NativeToJavaIceCandidate(
     const IceCandidate& candidate) {
   return CreateJavaIceCandidate(
       env, candidate.sdp_mid(), candidate.sdp_mline_index(),
-      candidate.ToString(), candidate.candidate().url(), 0);
+      candidate.ToString(), candidate.candidate().url(), 0,
+      candidate.candidate().username());
 }
 
 ScopedJavaLocalRef<jobject> NativeToJavaIceCandidatePtr(

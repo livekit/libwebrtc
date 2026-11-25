@@ -60,4 +60,33 @@
   EXPECT_EQ(sdp, iceCandidate.sdp.stdString);
 }
 
+- (void)testUsernameFragment {
+  NSString *sdp = @"candidate:4025901590 1 udp 2122265343 "
+                   "fdff:2642:12a6:fe38:c001:beda:fcf9:51aa "
+                   "59052 typ host generation 1 ufrag AbCd network-id 1";
+  RTC_OBJC_TYPE(RTCIceCandidate) *fromSdp =
+      [[RTC_OBJC_TYPE(RTCIceCandidate) alloc] initWithSdp:sdp
+                                            sdpMLineIndex:0
+                                                   sdpMid:@"audio"];
+  EXPECT_TRUE([@"AbCd" isEqualToString:fromSdp.usernameFragment]);
+
+  std::unique_ptr<webrtc::IceCandidate> nativeCandidate(
+      webrtc::CreateIceCandidate("audio", 0, sdp.stdString, nullptr));
+  RTC_OBJC_TYPE(RTCIceCandidate) *fromNative =
+      [[RTC_OBJC_TYPE(RTCIceCandidate) alloc]
+          initWithNativeCandidate:nativeCandidate.get()];
+  EXPECT_TRUE([@"AbCd" isEqualToString:fromNative.usernameFragment]);
+}
+
+- (void)testUsernameFragmentIsNilWhenTheCandidateHasNone {
+  NSString *sdp = @"candidate:4025901590 1 udp 2122265343 "
+                   "fdff:2642:12a6:fe38:c001:beda:fcf9:51aa "
+                   "59052 typ host generation 0";
+  RTC_OBJC_TYPE(RTCIceCandidate) *candidate =
+      [[RTC_OBJC_TYPE(RTCIceCandidate) alloc] initWithSdp:sdp
+                                            sdpMLineIndex:0
+                                                   sdpMid:@"audio"];
+  EXPECT_EQ(nil, candidate.usernameFragment);
+}
+
 @end

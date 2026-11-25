@@ -25,22 +25,47 @@ public class IceCandidate {
   public final String serverUrl;
   public final PeerConnection.AdapterType adapterType;
 
+  /**
+   * The ICE username fragment (ufrag) of the ICE generation the candidate belongs to, as
+   * {@code usernameFragment} in the web API. It changes with every ICE restart. Null when the
+   * candidate does not name one.
+   */
+  @Nullable public final String usernameFragment;
+
   public IceCandidate(String sdpMid, int sdpMLineIndex, String sdp) {
     this.sdpMid = sdpMid;
     this.sdpMLineIndex = sdpMLineIndex;
     this.sdp = sdp;
     this.serverUrl = "";
     this.adapterType = PeerConnection.AdapterType.UNKNOWN;
+    this.usernameFragment = usernameFragmentOf(sdp);
   }
 
   @CalledByNative
   IceCandidate(String sdpMid, int sdpMLineIndex, String sdp, String serverUrl,
-      PeerConnection.AdapterType adapterType) {
+      PeerConnection.AdapterType adapterType, String usernameFragment) {
     this.sdpMid = sdpMid;
     this.sdpMLineIndex = sdpMLineIndex;
     this.sdp = sdp;
     this.serverUrl = serverUrl;
     this.adapterType = adapterType;
+    this.usernameFragment =
+        usernameFragment == null || usernameFragment.isEmpty() ? null : usernameFragment;
+  }
+
+  /** Reads the fragment from a candidate line, which names it as {@code ufrag <value>}. */
+  @Nullable
+  private static String usernameFragmentOf(@Nullable String sdp) {
+    if (sdp == null) {
+      return null;
+    }
+    String[] tokens = sdp.trim().split("\\s+");
+    for (int i = 0; i + 1 < tokens.length; i++) {
+      if (tokens[i].equals("ufrag")) {
+        return tokens[i + 1];
+      }
+    }
+    return null;
   }
 
   @Override
