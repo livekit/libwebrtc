@@ -246,6 +246,16 @@ if (!build_with_chromium) {
   }
 }
 
+# State and transition planning of the AVAudioEngine based ADM
+# (audio_engine_device.mm). Plain C++, so it builds and is tested on any host.
+rtc_library("audio_engine_state") {
+  visibility = [ ":*" ]
+  sources = [
+    "audio_engine_state.cc",
+    "audio_engine_state.h",
+  ]
+}
+
 # Contains default implementations of webrtc::AudioDeviceModule for Windows,
 # Linux, Mac, iOS and Android.
 rtc_library("audio_device_impl") {
@@ -364,6 +374,7 @@ rtc_library("audio_device_impl") {
           "audio_engine_device.h",
           "audio_engine_device.mm",
         ]
+        deps += [ ":audio_engine_state" ]
       }
       if (is_ios) {
         deps += [
@@ -458,6 +469,7 @@ if (rtc_include_tests && !build_with_chromium) {
     testonly = true
 
     sources = [
+      "audio_engine_state_unittest.cc",
       "fine_audio_buffer_unittest.cc",
       "include/test_audio_device_unittest.cc",
       "test_audio_device_impl_test.cc",
@@ -466,6 +478,7 @@ if (rtc_include_tests && !build_with_chromium) {
       ":audio_device_buffer",
       ":audio_device_generic",
       ":audio_device_impl",
+      ":audio_engine_state",
       ":mock_audio_device",
       ":test_audio_device_module",
       "../../api:scoped_refptr",
@@ -494,6 +507,16 @@ if (rtc_include_tests && !build_with_chromium) {
     ]
     if (is_linux || is_chromeos || is_mac || is_win) {
       sources += [ "audio_device_unittest.cc" ]
+    }
+    if (is_mac && rtc_include_internal_audio_device) {
+      # Runs the engine ADM on the host's output device, so it skips on a
+      # host without one.
+      sources += [ "audio_engine_device_unittest.mm" ]
+      deps += [
+        "../../api/environment:environment_factory",
+        "../../test:run_loop",
+      ]
+      frameworks = [ "AVFAudio.framework" ]
     }
     if (is_win) {
       sources += [ "win/core_audio_utility_win_unittest.cc" ]

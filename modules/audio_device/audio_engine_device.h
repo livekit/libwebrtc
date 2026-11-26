@@ -18,6 +18,7 @@
 #define SDK_OBJC_NATIVE_SRC_AUDIO_AUDIO_DEVICE_AUDIOENGINE_H_
 
 #include <atomic>
+#include <functional>
 #include <memory>
 
 #include "api/audio_options.h"
@@ -26,6 +27,7 @@
 #include "api/sequence_checker.h"
 #include "api/task_queue/pending_task_safety_flag.h"
 #include "modules/audio_device/audio_device_generic.h"
+#include "modules/audio_device/audio_engine_state.h"
 #include "rtc_base/buffer.h"
 #include "rtc_base/thread.h"
 #include "rtc_base/thread_annotations.h"
@@ -109,163 +111,17 @@ extern NSString* const kAudioEngineInputMixerNodeKey;
 
 class AudioEngineDevice : public AudioDeviceModule, public AudioSessionObserver {
  public:
-  enum RenderMode { Device = 0, Manual = 1 };
-  enum MuteMode {
-    // Mute input using voice processing
-    VoiceProcessing = 0,
-    // Mute by restarting engine
-    RestartEngine = 1,
-    // Mute input by muting the input mixer node
-    InputMixer = 2,
-  };
+  using RenderMode = audio_engine::RenderMode;
+  using MuteMode = audio_engine::MuteMode;
+  using AudioDuckingLevel = audio_engine::AudioDuckingLevel;
+  // Callers name these enumerators through the class.
+  static constexpr AudioDuckingLevel AudioDuckingLevelDefault = audio_engine::AudioDuckingLevelDefault;
+  static constexpr AudioDuckingLevel AudioDuckingLevelMin = audio_engine::AudioDuckingLevelMin;
+  static constexpr AudioDuckingLevel AudioDuckingLevelMid = audio_engine::AudioDuckingLevelMid;
+  static constexpr AudioDuckingLevel AudioDuckingLevelMax = audio_engine::AudioDuckingLevelMax;
 
-  // Ducking level for voice processing.
-  // Maps to AVAudioVoiceProcessingOtherAudioDuckingLevel (iOS 17.0+, macOS 14.0+).
-  enum AudioDuckingLevel {
-    AudioDuckingLevelDefault = 0,
-    AudioDuckingLevelMin = 1,
-    AudioDuckingLevelMid = 2,
-    AudioDuckingLevelMax = 3,
-  };
-
-  // Represents the state of the audio engine, including input/output status,
-  // rendering mode, and various configuration flags.
-  struct EngineState {
-    bool input_enabled = false;
-    bool input_running = false;
-    bool output_enabled = false;
-    bool output_running = false;
-
-    bool output_available = true;
-    bool input_available = true;
-
-    bool input_enabled_persistent_mode = false;
-
-    bool input_muted = true;
-    bool is_interrupted = false;
-
-    RenderMode render_mode = RenderMode::Device;
-    MuteMode mute_mode = MuteMode::VoiceProcessing;
-
-    // App-level policy for Apple's platform voice processing. When false, the
-    // runtime audio-processing resolver treats Apple VPIO as unavailable, so
-    // automatic mode falls back to WebRTC software processing and platform mode
-    // is rejected.
-    bool platform_voice_processing_allowed = true;
-    bool voice_processing_enabled = true;
-    bool voice_processing_bypassed = false;
-    bool voice_processing_agc_enabled = true;
-    // Requested built-in AEC/NS state. AVAudioEngine exposes one VPIO bypass knob
-    // for AEC and NS. AGC has a separate switch, but only has an effect while
-    // VPIO is active.
-    bool built_in_aec_enabled = true;
-    bool built_in_ns_enabled = true;
-    bool advanced_ducking = false;
-    AudioDuckingLevel ducking_level = AudioDuckingLevelMin;
-
-    uint32_t output_device_id = 0;  // kAudioObjectUnknown
-    uint32_t input_device_id = 0;   // kAudioObjectUnknown
-
-    uint32_t default_output_device_update_count = 0;  // Track default switch count
-    uint32_t default_input_device_update_count = 0;
-
-    bool operator==(const EngineState& rhs) const {
-      return input_enabled == rhs.input_enabled && input_running == rhs.input_running &&
-             output_enabled == rhs.output_enabled && output_running == rhs.output_running &&
-             input_available == rhs.input_available && output_available == rhs.output_available &&
-             input_enabled_persistent_mode == rhs.input_enabled_persistent_mode && input_muted == rhs.input_muted &&
-             is_interrupted == rhs.is_interrupted && render_mode == rhs.render_mode && mute_mode == rhs.mute_mode &&
-             platform_voice_processing_allowed == rhs.platform_voice_processing_allowed &&
-             voice_processing_enabled == rhs.voice_processing_enabled &&
-             voice_processing_bypassed == rhs.voice_processing_bypassed &&
-             voice_processing_agc_enabled == rhs.voice_processing_agc_enabled &&
-             built_in_aec_enabled == rhs.built_in_aec_enabled && built_in_ns_enabled == rhs.built_in_ns_enabled &&
-             advanced_ducking == rhs.advanced_ducking && ducking_level == rhs.ducking_level &&
-             output_device_id == rhs.output_device_id && input_device_id == rhs.input_device_id &&
-             default_output_device_update_count == rhs.default_output_device_update_count &&
-             default_input_device_update_count == rhs.default_input_device_update_count;
-    }
-
-    bool operator!=(const EngineState& rhs) const { return !(*this == rhs); }
-
-    // AUDIO STATE LOGIC
-    //
-    // Device Mode:
-    // - Output follows input to keep AVAudioEngine IO active for capture.
-    // - Input respects mute mode restrictions (RestartEngine + input_muted)
-    //
-    // Manual Mode:
-    // - Bidirectional coupling: if ANY component is enabled/running, BOTH are considered
-    // enabled/running
-    // - No mute mode restrictions (manual control bypasses automatic muting)
-    // - Required for AVAudioEngine graph connectivity (input must connect to output)
-    //
-    // All modes respect availability flags (input_available/output_available)
-
-    bool IsOutputEnabled() const {
-      if (!output_available) return false;
-
-      switch (render_mode) {
-        case RenderMode::Device:
-          return IsInputEnabled() || output_enabled;
-        case RenderMode::Manual:
-          return output_enabled || input_enabled || input_enabled_persistent_mode;
-      }
-    }
-
-    bool IsOutputRunning() const {
-      if (!output_available) return false;
-
-      switch (render_mode) {
-        case RenderMode::Device:
-          return IsInputRunning() || output_running;
-        case RenderMode::Manual:
-          return output_running || input_running;
-      }
-    }
-
-    bool IsInputEnabled() const {
-      if (!input_available) return false;
-
-      switch (render_mode) {
-        case RenderMode::Device:
-          return !(mute_mode == MuteMode::RestartEngine && input_muted) &&
-                 (input_enabled || input_enabled_persistent_mode);
-        case RenderMode::Manual:
-          return input_enabled || input_enabled_persistent_mode || output_enabled;
-      }
-    }
-
-    bool IsInputRunning() const {
-      if (!input_available) return false;
-
-      switch (render_mode) {
-        case RenderMode::Device:
-          return !(mute_mode == MuteMode::RestartEngine && input_muted) && input_running;
-        case RenderMode::Manual:
-          return input_running || output_running;
-      }
-    }
-
-    bool IsAnyEnabled() const { return IsInputEnabled() || IsOutputEnabled(); }
-    bool IsAnyRunning() const { return IsInputRunning() || IsOutputRunning(); }
-
-    bool IsOutputDefaultDevice() const {
-#if TARGET_OS_OSX
-      return output_device_id == kAudioObjectUnknown;
-#else
-      return output_device_id == 0;
-#endif
-    }
-
-    bool IsInputDefaultDevice() const {
-#if TARGET_OS_OSX
-      return input_device_id == kAudioObjectUnknown;
-#else
-      return input_device_id == 0;
-#endif
-    }
-  };
+  // The state of the engine, see audio_engine_state.h.
+  using EngineState = audio_engine::EngineState;
 
   explicit AudioEngineDevice(const Environment& env, bool voice_processing_bypassed);
   ~AudioEngineDevice() override;
@@ -403,82 +259,21 @@ class AudioEngineDevice : public AudioDeviceModule, public AudioSessionObserver 
 
   bool IsStopOnMuteModeEnabled() const override;
 
- private:
-  struct EngineStateUpdate {
-    EngineState prev;
-    EngineState next;
-
-    bool HasNoChanges() const { return prev == next; }
-
-    bool DidEnableOutput() const { return !prev.IsOutputEnabled() && next.IsOutputEnabled(); }
-
-    bool DidEnableInput() const { return !prev.IsInputEnabled() && next.IsInputEnabled(); }
-
-    bool DidDisableOutput() const { return prev.IsOutputEnabled() && !next.IsOutputEnabled(); }
-
-    bool DidDisableInput() const { return prev.IsInputEnabled() && !next.IsInputEnabled(); }
-
-    bool DidAnyEnable() const { return DidEnableOutput() || DidEnableInput(); }
-
-    bool DidAnyDisable() const { return DidDisableOutput() || DidDisableInput(); }
-
-    bool DidBeginInterruption() const { return !prev.is_interrupted && next.is_interrupted; }
-
-    bool DidEndInterruption() const { return prev.is_interrupted && !next.is_interrupted; }
-
-    bool DidUpdateAudioGraph() const {
-      return (prev.IsInputEnabled() != next.IsInputEnabled()) ||
-             (prev.IsOutputEnabled() != next.IsOutputEnabled());
-    }
-
-    bool DidUpdateVoiceProcessingEnabled() const {
-      return prev.voice_processing_enabled != next.voice_processing_enabled;
-    }
-
-    bool DidUpdateOutputDevice() const { return prev.output_device_id != next.output_device_id; }
-
-    bool DidUpdateInputDevice() const { return prev.input_device_id != next.input_device_id; }
-
-    bool DidUpdateDefaultOutputDevice() const {
-      return prev.default_output_device_update_count != next.default_output_device_update_count;
-    }
-
-    bool DidUpdateDefaultInputDevice() const {
-      return prev.default_input_device_update_count != next.default_input_device_update_count;
-    }
-
-    bool DidUpdateMuteMode() const { return prev.mute_mode != next.mute_mode; }
-
-    bool IsEngineRestartRequired() const { return DidUpdateAudioGraph(); }
-
-    bool IsEngineRecreateRequired() const {
-      // Device id specified
-      bool device = DidUpdateOutputDevice() || DidUpdateInputDevice();
-
-      // Default device updated
-      bool default_device = (DidUpdateDefaultOutputDevice() && next.IsOutputDefaultDevice()) ||
-                            (DidUpdateDefaultInputDevice() && next.IsInputDefaultDevice());
-
-      // Special case to re-create engine when switching from Speaker & Mic ->
-      // Speaker only.
-      bool special_case = (prev.IsOutputEnabled() && next.IsOutputEnabled()) &&
-                          (prev.IsInputEnabled() && !next.IsInputEnabled());
-
-      // Toggling voice processing requires a full engine recreate to ensure
-      // a clean audio hardware state.
-      bool voice_processing = DidUpdateVoiceProcessingEnabled();
-
-      return device || default_device || special_case || voice_processing;
-    }
-
-    bool DidEnableManualRenderingMode() const {
-      return prev.render_mode != RenderMode::Manual && next.render_mode == RenderMode::Manual;
-    }
-
-    bool DidEnableDeviceRenderingMode() const {
-      return prev.render_mode != RenderMode::Device && next.render_mode == RenderMode::Device;
-    }
+  // Test only. Steps of a device transition where a test can inject a failure
+  // that an observer hook cannot cause.
+  enum class FaultPoint {
+    // The engine start fails, as if -[AVAudioEngine startAndReturnError:]
+    // failed on every attempt.
+    kStartEngine,
   };
+  // Test only. `injector` runs on the ADM thread at each fault point. A
+  // non-zero result fails that step with the returned error. Pass nullptr to
+  // remove it.
+  void SetFaultInjectorForTesting(std::function<int32_t(FaultPoint)> injector);
+
+ private:
+  using EngineStateUpdate = audio_engine::EngineStateUpdate;
+  using TransitionPlan = audio_engine::TransitionPlan;
 
   EngineState engine_state_ RTC_GUARDED_BY(thread_);
 
@@ -596,6 +391,8 @@ class AudioEngineDevice : public AudioDeviceModule, public AudioSessionObserver 
   AVAudioPCMBuffer* converter_buffer_;
 
   void* configuration_observer_ RTC_GUARDED_BY(thread_) = nullptr;
+
+  std::function<int32_t(FaultPoint)> fault_injector_ RTC_GUARDED_BY(thread_);
 };
 }  // namespace webrtc
 
