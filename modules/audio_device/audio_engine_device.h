@@ -275,12 +275,42 @@ class AudioEngineDevice : public AudioDeviceModule, public AudioSessionObserver 
   using EngineStateUpdate = audio_engine::EngineStateUpdate;
   using TransitionPlan = audio_engine::TransitionPlan;
 
+  // The committed state. Every change goes through ModifyEngineState.
+  //
+  // Commit rules:
+  // - A transition that succeeds commits the requested state.
+  // - A transition that fails before any step stopped or released something
+  //   rolls back and commits nothing. The caller gets the error and the
+  //   module is as it was.
+  // - A transition that fails after such a step cannot roll back to the
+  //   previous state, because a stopped or released engine is not restored.
+  //   The module then tears the engine down to a baseline, commits the
+  //   requested state with `needs_rebuild_` set, and returns the error. So
+  //   an error can be returned while the requested state is committed.
+  //
+  // While `needs_rebuild_` is set nothing runs, Playing(), Recording(),
+  // PlayoutIsInitialized() and RecordingIsInitialized() return false, and
+  // GetEngineState() still returns the requested state. The next transition,
+  // even one that requests the committed state again, rebuilds the engine
+  // from RebuildBaseline().
   EngineState engine_state_ RTC_GUARDED_BY(thread_);
+  bool needs_rebuild_ RTC_GUARDED_BY(thread_) = false;
 
   int32_t ModifyEngineState(std::function<EngineState(EngineState)> state_transform);
 
-  int32_t ApplyDeviceEngineState(EngineStateUpdate state);
+  // `needs_rebuild` is set when the transition failed after a step that
+  // stopped or released something, and the engine was torn down.
+  int32_t ApplyDeviceEngineState(EngineStateUpdate state, bool* needs_rebuild);
   int32_t ApplyManualEngineState(EngineStateUpdate state);
+
+  // Brings the device engine to a known baseline after a failed transition:
+  // no configuration observer, engine stopped and released, buffers stopped,
+  // nodes and converter dropped. Teardown hooks are sent only with a non-nil
+  // engine. `observer_enabled` says whether the observer still holds an
+  // enable, as far as the hooks it got tell. If so it gets OnEngineDidDisable
+  // with nothing enabled. After a failed recreate the rollback of the new
+  // engine already sent it, on that engine before its release.
+  void TearDownAfterFailedTransition(bool observer_enabled);
 
   // Recreates `fine_audio_buffer_` if null: the enable steps that create it and
   // the buffer-start steps that use it have different conditions.

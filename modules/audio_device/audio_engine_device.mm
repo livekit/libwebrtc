@@ -475,14 +475,16 @@ bool AudioEngineDevice::PlayoutIsInitialized() const {
   LOGI() << "PlayoutIsInitialized";
   RTC_DCHECK_RUN_ON(thread_);
 
-  return engine_state_.output_enabled;
+  // Nothing runs while a rebuild is pending.
+  return engine_state_.output_enabled && !needs_rebuild_;
 }
 
 bool AudioEngineDevice::Playing() const {
   LOGI() << "Playing";
   RTC_DCHECK_RUN_ON(thread_);
 
-  return engine_state_.output_running;
+  // Nothing runs while a rebuild is pending.
+  return engine_state_.output_running && !needs_rebuild_;
 }
 
 int32_t AudioEngineDevice::InitPlayout() {
@@ -530,14 +532,16 @@ bool AudioEngineDevice::RecordingIsInitialized() const {
   LOGI() << "RecordingIsInitialized";
   RTC_DCHECK_RUN_ON(thread_);
 
-  return engine_state_.input_enabled;
+  // Nothing runs while a rebuild is pending.
+  return engine_state_.input_enabled && !needs_rebuild_;
 }
 
 bool AudioEngineDevice::Recording() const {
   LOGI() << "Recording";
   RTC_DCHECK_RUN_ON(thread_);
 
-  return engine_state_.input_running;
+  // Nothing runs while a rebuild is pending.
+  return engine_state_.input_running && !needs_rebuild_;
 }
 
 int32_t AudioEngineDevice::InitRecording() {
@@ -1655,6 +1659,74 @@ void AudioEngineDevice::StopDeviceEngineAudioUnits() {
   }
 }
 
+void AudioEngineDevice::TearDownAfterFailedTransition(bool observer_enabled) {
+  RTC_DCHECK_RUN_ON(thread_);
+  LOGW() << "Tearing down the engine after a failed transition, the next request rebuilds it";
+
+  if (configuration_observer_ != nullptr) {
+    NSNotificationCenter* center = [NSNotificationCenter defaultCenter];
+    [center removeObserver:(__bridge_transfer id)configuration_observer_
+                      name:AVAudioEngineConfigurationChangeNotification
+                    object:nil];
+    configuration_observer_ = nil;
+  }
+
+  if (engine_device_ != nil && engine_device_.running) {
+    [engine_device_ stop];
+    if (observer_ != nullptr) {
+      int32_t result = observer_->OnEngineDidStop(engine_device_, false, false);
+      if (result != 0) {
+        // Teardown hooks cannot fail the operation, see AudioDeviceObserver.
+        LOGE() << "Call to OnEngineDidStop returned error during teardown: " << result;
+      }
+    }
+  }
+
+  if (audio_device_buffer_->IsPlaying()) {
+    audio_device_buffer_->StopPlayout();
+  }
+  if (audio_device_buffer_->IsRecording()) {
+    audio_device_buffer_->StopRecording();
+  }
+
+  // The nodes belong to the engine and go with it. A rebuild creates new ones.
+  source_node_ = nil;
+  sink_node_ = nil;
+  input_mixer_node_ = nil;
+  if (converter_ref_ != nullptr) {
+    AudioConverterDispose(converter_ref_);
+    converter_ref_ = nullptr;
+  }
+  converter_buffer_ = nil;
+
+  if (observer_enabled && observer_ != nullptr) {
+    if (engine_device_ != nil) {
+      int32_t result = observer_->OnEngineDidDisable(engine_device_, false, false);
+      if (result != 0) {
+        // Teardown hooks cannot fail the operation, see AudioDeviceObserver.
+        LOGE() << "Call to OnEngineDidDisable returned error during teardown: " << result;
+      }
+    } else {
+      // Only after a recreate whose OnEngineDidCreate failed: no engine the
+      // observer accepted is left, and no hook gets a nil engine. The observer
+      // keeps its enable, and the rebuild enables again.
+      LOGW() << "No engine to pass to OnEngineDidDisable during teardown";
+    }
+  }
+
+  if (engine_device_ != nil) {
+    StopDeviceEngineAudioUnits();
+    if (observer_ != nullptr) {
+      int32_t result = observer_->OnEngineWillRelease(engine_device_);
+      if (result != 0) {
+        // Teardown hooks cannot fail the operation, see AudioDeviceObserver.
+        LOGE() << "Call to OnEngineWillRelease returned error during teardown: " << result;
+      }
+    }
+    engine_device_ = nil;
+  }
+}
+
 void AudioEngineDevice::ReconfigureEngine() {
   LOGI() << "ReconfigureEngine";
 
@@ -1711,12 +1783,33 @@ int32_t AudioEngineDevice::ModifyEngineState(
 
   EngineState old_state = engine_state_;
   EngineState new_state = state_transform(old_state);
-  EngineStateUpdate state = {old_state, new_state};
 
-  // No changes, return immediately.
-  if (state.HasNoChanges()) {
+  // No changes, return immediately. A pending rebuild makes even an identical
+  // request rebuild the engine.
+  if (!needs_rebuild_ && old_state == new_state) {
     return 0;
   }
+
+  // The engine was torn down after a failed transition, so there is nothing to
+  // stop at an interruption begin. Record the interruption without starting
+  // the engine, and leave the rebuild to its end or to the next request.
+  if (needs_rebuild_ && !old_state.is_interrupted && new_state.is_interrupted) {
+    EngineState interrupted_state = old_state;
+    interrupted_state.is_interrupted = true;
+    if (interrupted_state == new_state) {
+      LOGI() << "ModifyEngineState: Interruption began while a rebuild is pending";
+      engine_state_ = new_state;
+      return 0;
+    }
+  }
+
+  // After a failed transition the engine was torn down, so plan from a state
+  // with nothing enabled. See RebuildBaseline.
+  if (needs_rebuild_) {
+    LOGI() << "ModifyEngineState: Rebuilding the engine after a failed transition";
+  }
+  EngineStateUpdate state = {
+      needs_rebuild_ ? audio_engine::RebuildBaseline(old_state) : old_state, new_state};
 
   // Check input should be enabled if running.
   if (new_state.input_running && !new_state.input_enabled) {
@@ -1732,12 +1825,15 @@ int32_t AudioEngineDevice::ModifyEngineState(
 
   int32_t shutdown_result = 0;
   int32_t startup_result = 0;
+  // Set when a device transition failed after a step that stopped or released
+  // something, and the engine was torn down.
+  bool needs_rebuild = false;
 
   // Did switch Device -> Manual rendering
   if (state.DidEnableManualRenderingMode()) {
     EngineStateUpdate shutdown_state = state;                  // Copy current state
     shutdown_state.next = {};                                  // Reset next state to default
-    shutdown_result = ApplyDeviceEngineState(shutdown_state);  // Shutdown device rendering
+    shutdown_result = ApplyDeviceEngineState(shutdown_state, &needs_rebuild);  // Shutdown device rendering
     if (shutdown_result != 0) {
       LOGE() << "ModifyEngineState: Failed to shutdown device rendering, error: "
              << shutdown_result;
@@ -1758,12 +1854,12 @@ int32_t AudioEngineDevice::ModifyEngineState(
     }
     EngineStateUpdate startup_state = state;                 // Copy current state
     startup_state.prev = {};                                 // Reset prev state to default
-    startup_result = ApplyDeviceEngineState(startup_state);  // Start device mode
+    startup_result = ApplyDeviceEngineState(startup_state, &needs_rebuild);  // Start device mode
     if (startup_result != 0) {
       LOGE() << "ModifyEngineState: Failed to start device mode, error: " << startup_result;
     }
   } else if (new_state.render_mode == RenderMode::Device) {
-    shutdown_result = ApplyDeviceEngineState(state);
+    shutdown_result = ApplyDeviceEngineState(state, &needs_rebuild);
     if (shutdown_result != 0) {
       LOGE() << "ModifyEngineState: Failed to update state in device mode, error: "
              << shutdown_result;
@@ -1808,6 +1904,16 @@ int32_t AudioEngineDevice::ModifyEngineState(
 
     // Update engine state if no error
     engine_state_ = new_state;
+    needs_rebuild_ = false;
+  } else if (needs_rebuild) {
+    // The failure came after a step that stopped or released something, so
+    // the previous state cannot be restored. The engine was torn down to a
+    // baseline. Commit the requested state so that the next request, even an
+    // identical one, rebuilds it, and still return the error.
+    LOGE() << "ModifyEngineState: Committing the requested state with a rebuild pending, error: "
+           << return_result;
+    engine_state_ = new_state;
+    needs_rebuild_ = true;
   }
 
   return return_result;
@@ -2157,9 +2263,10 @@ int32_t AudioEngineDevice::ApplyManualEngineState(EngineStateUpdate state) {
   return 0;
 }
 
-int32_t AudioEngineDevice::ApplyDeviceEngineState(EngineStateUpdate state) {
+int32_t AudioEngineDevice::ApplyDeviceEngineState(EngineStateUpdate state, bool* needs_rebuild) {
   RTC_DCHECK_RUN_ON(thread_);
   RTC_DCHECK(engine_manual_input_ == nullptr);
+  RTC_DCHECK(needs_rebuild != nullptr);
 
   // --- Diagnostic: state transition summary ---
   auto mute_mode_str = [](MuteMode m) -> const char* {
@@ -2236,10 +2343,22 @@ int32_t AudioEngineDevice::ApplyDeviceEngineState(EngineStateUpdate state) {
 
   std::vector<std::function<void()>> rollback_actions;
 
+  // Set once a step stopped or released something. The rollback actions do
+  // not restore those steps, so a failure after one tears down to a baseline
+  // instead of returning to the previous state.
+  bool destructive_step_ran = false;
+  // Whether the observer holds an enable, as far as the hooks it got tell.
+  bool observer_enabled = state.prev.IsAnyEnabled();
+
   auto rollback = [&](int32_t result) {
     // Execute rollback actions in reverse order (LIFO)
     for (auto it = rollback_actions.rbegin(); it != rollback_actions.rend(); ++it) {
       (*it)();
+    }
+
+    if (destructive_step_ran) {
+      TearDownAfterFailedTransition(observer_enabled);
+      *needs_rebuild = true;
     }
 
     return result;
@@ -2267,6 +2386,7 @@ int32_t AudioEngineDevice::ApplyDeviceEngineState(EngineStateUpdate state) {
 
     if (engine_device_ != nil) {
       [engine_device_ stop];
+      destructive_step_ran = true;
 
       if (observer_ != nullptr) {
         int32_t result = observer_->OnEngineDidStop(engine_device_, state.next.IsOutputEnabled(),
@@ -2289,6 +2409,7 @@ int32_t AudioEngineDevice::ApplyDeviceEngineState(EngineStateUpdate state) {
       RTC_DCHECK(!engine_device_.running);
     }
     audio_device_buffer_->StopPlayout();
+    destructive_step_ran = true;
   }
 
   // --------------------------------------------------------------------------------------------
@@ -2301,6 +2422,7 @@ int32_t AudioEngineDevice::ApplyDeviceEngineState(EngineStateUpdate state) {
       RTC_DCHECK(!engine_device_.running);
     }
     audio_device_buffer_->StopRecording();
+    destructive_step_ran = true;
   }
 
   // --------------------------------------------------------------------------------------------
@@ -2311,6 +2433,7 @@ int32_t AudioEngineDevice::ApplyDeviceEngineState(EngineStateUpdate state) {
 
     if (engine_device_ != nil) {
       StopDeviceEngineAudioUnits();
+      destructive_step_ran = true;
     }
 
     if (observer_ != nullptr && engine_device_ != nil) {
@@ -2349,8 +2472,18 @@ int32_t AudioEngineDevice::ApplyDeviceEngineState(EngineStateUpdate state) {
         LOGE() << "Call to OnEngineDidCreate returned error: " << result;
         return rollback(result);
       }
-      rollback_actions.push_back([this]() {
+      rollback_actions.push_back([this, &destructive_step_ran, &observer_enabled]() {
         RTC_DCHECK_RUN_ON(thread_);
+        // A failed recreate cannot return to the released engine, so the
+        // teardown leaves nothing enabled. Report the disable here, on the
+        // engine the observer still knows, before its release.
+        if (destructive_step_ran && observer_enabled && observer_ != nullptr) {
+          int32_t result = observer_->OnEngineDidDisable(engine_device_, false, false);
+          if (result != 0) {
+            LOGE() << "Call to OnEngineDidDisable returned error during rollback: " << result;
+          }
+          observer_enabled = false;
+        }
         // An observer may set up per-engine state in OnEngineDidCreate, such as
         // attaching its own nodes, and only tear it down in OnEngineWillRelease.
         // If a later step fails, the create rollback drops this engine, so tell
@@ -2613,6 +2746,7 @@ int32_t AudioEngineDevice::ApplyDeviceEngineState(EngineStateUpdate state) {
   } else if (plan.disable_output) {
     LOGI() << "Disabling output for AVAudioEngine...";
     RTC_DCHECK(!engine_device_.running);
+    destructive_step_ran = true;
 
     // Detach source node
     if (source_node_ != nil) {
@@ -2828,6 +2962,7 @@ int32_t AudioEngineDevice::ApplyDeviceEngineState(EngineStateUpdate state) {
   } else if (plan.disable_input) {
     LOGI() << "Disabling input for AVAudioEngine...";
     RTC_DCHECK(!engine_device_.running);
+    destructive_step_ran = true;
 
     // If disabling input, always unmute the voice-processing input mute.
     // Set unconditionally to avoid a potentially unsafe VP property read.
@@ -2879,12 +3014,17 @@ int32_t AudioEngineDevice::ApplyDeviceEngineState(EngineStateUpdate state) {
   // Step: Trigger "engine did disable" event
   //
   if (plan.did_disable && observer_ != nullptr) {
-    int32_t result = observer_->OnEngineDidDisable(engine_device_, state.next.IsOutputEnabled(),
-                                                   state.next.IsInputEnabled());
-    if (result != 0) {
-      // Teardown hooks cannot fail the operation, see AudioDeviceObserver.
-      LOGE() << "Call to OnEngineDidDisable returned error: " << result;
+    if (engine_device_ != nil) {
+      int32_t result = observer_->OnEngineDidDisable(engine_device_, state.next.IsOutputEnabled(),
+                                                     state.next.IsInputEnabled());
+      if (result != 0) {
+        // Teardown hooks cannot fail the operation, see AudioDeviceObserver.
+        LOGE() << "Call to OnEngineDidDisable returned error: " << result;
+      }
+    } else {
+      LOGE() << "No engine to pass to OnEngineDidDisable";
     }
+    observer_enabled = state.next.IsAnyEnabled();
   }
 
   // --------------------------------------------------------------------------------------------
@@ -3165,13 +3305,15 @@ int32_t AudioEngineDevice::ApplyDeviceEngineState(EngineStateUpdate state) {
   if (plan.final_release) {
     RTC_DCHECK(engine_device_ != nullptr);
 
-    StopDeviceEngineAudioUnits();
+    if (engine_device_ != nil) {
+      StopDeviceEngineAudioUnits();
 
-    if (observer_ != nullptr) {
-      int32_t result = observer_->OnEngineWillRelease(engine_device_);
-      if (result != 0) {
-        // Teardown hooks cannot fail the operation, see AudioDeviceObserver.
-        LOGE() << "Call to OnEngineWillRelease returned error: " << result;
+      if (observer_ != nullptr) {
+        int32_t result = observer_->OnEngineWillRelease(engine_device_);
+        if (result != 0) {
+          // Teardown hooks cannot fail the operation, see AudioDeviceObserver.
+          LOGE() << "Call to OnEngineWillRelease returned error: " << result;
+        }
       }
     }
 

@@ -178,5 +178,15 @@ TransitionPlan PlanDeviceTransition(const EngineStateUpdate& update) {
   return plan;
 }
 
+EngineState RebuildBaseline(const EngineState& committed) {
+  EngineState baseline = committed;
+  baseline.input_enabled = false;
+  baseline.input_running = false;
+  baseline.output_enabled = false;
+  baseline.output_running = false;
+  baseline.input_enabled_persistent_mode = false;
+  return baseline;
+}
+
 }  // namespace audio_engine
 }  // namespace webrtc

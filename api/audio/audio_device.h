@@ -305,6 +305,17 @@ class AudioDeviceObserver {
   // Teardown hooks (OnEngineDidStop, OnEngineDidDisable and OnEngineWillRelease)
   // run once the engine has stopped, which cannot be undone. A non-zero result
   // is only logged, and the operation completes.
+  //
+  // An operation can fail after it stopped or released the engine, for
+  // example when the start after an engine recreate fails. The previous state
+  // cannot be restored then, so the ADM tears the engine down instead: it
+  // stops and releases the engine with the teardown hooks, and calls
+  // OnEngineDidDisable with nothing enabled if the observer still holds an
+  // enable. It keeps the requested state and returns the error. So an error
+  // can be returned while the requested state is kept. Nothing runs until the
+  // next operation, which rebuilds the engine from scratch with the setup
+  // hooks, even when it requests the same state again. No hook ever receives
+  // a nil engine.
   virtual int32_t OnEngineDidCreate(AVAudioEngine* engine) { return 0; }
 
   // `voice_processing_enabled` reports the resolved Apple Voice Processing I/O

@@ -144,6 +144,14 @@ RTC_OBJC_EXPORT @protocol RTC_OBJC_TYPE
 // Teardown events (`didStopEngine`, `didDisableEngine` and `willReleaseEngine`)
 // fire once the engine has stopped, which cannot be undone. A non-zero result
 // is only logged, and the operation completes.
+//
+// An operation can fail after it stopped or released the engine, for example
+// when the start after an engine recreate fails. The module then tears the
+// engine down with the teardown events, sends `didDisableEngine` with nothing
+// enabled if the delegate still holds an enable, keeps the requested state and
+// returns the error. Nothing runs until the next operation, which rebuilds the
+// engine with the setup events, even when it requests the same state again.
+// `isPlaying` and `isRecording` report NO until then.
 - (NSInteger)audioDeviceModule:(RTC_OBJC_TYPE(RTCAudioDeviceModule) *)audioDeviceModule
                didCreateEngine:(AVAudioEngine *)engine
     NS_SWIFT_NAME(audioDeviceModule(_:didCreateEngine:));

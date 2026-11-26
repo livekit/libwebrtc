@@ -249,6 +249,14 @@ struct TransitionPlan {
 // on `update`.
 TransitionPlan PlanDeviceTransition(const EngineStateUpdate& update);
 
+// The state a rebuild plans from. After a transition fails past a step that
+// stopped or released something, AudioEngineDevice tears the engine down and
+// commits the requested state with a rebuild pending. The next transition
+// then starts from `committed` with nothing enabled or running, so it creates,
+// enables and starts the engine like a fresh enable, and the observer gets a
+// will-enable again for the disable the teardown reported.
+EngineState RebuildBaseline(const EngineState& committed);
+
 }  // namespace audio_engine
 }  // namespace webrtc
 

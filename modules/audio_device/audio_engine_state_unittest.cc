@@ -598,6 +598,63 @@ TEST(AudioEngineStateTest, IdleToIdleNeedsNoEngine) {
   EXPECT_THAT(Steps(TransitionPlan()), IsEmpty());
 }
 
+// MARK: - Rebuild after a failed transition
+
+TEST(AudioEngineStateTest, RebuildBaselineHasNothingEnabledAndKeepsConfiguration) {
+  EngineState committed = PlayingAndRecording();
+  committed.input_enabled_persistent_mode = true;
+  committed.mute_mode = MuteMode::InputMixer;
+  committed.voice_processing_enabled = false;
+  committed.output_device_id = 7;
+  committed.default_input_device_update_count = 3;
+  committed.is_interrupted = true;
+
+  EngineState baseline = RebuildBaseline(committed);
+  EXPECT_FALSE(baseline.IsAnyEnabled());
+  EXPECT_FALSE(baseline.IsAnyRunning());
+  EXPECT_EQ(baseline.mute_mode, MuteMode::InputMixer);
+  EXPECT_FALSE(baseline.voice_processing_enabled);
+  EXPECT_EQ(baseline.output_device_id, 7u);
+  EXPECT_EQ(baseline.default_input_device_update_count, 3u);
+  EXPECT_TRUE(baseline.is_interrupted);
+}
+
+TEST(AudioEngineStateTest, RebuildIsAFreshEnable) {
+  // Same steps as from idle: a new engine, will-enable, then start. Nothing to
+  // stop or release, so a failure in a rebuild commits nothing.
+  EXPECT_EQ(Plan(RebuildBaseline(Playing()), Playing()), Plan(Idle(), Playing()));
+  EXPECT_EQ(Plan(RebuildBaseline(PlayingAndRecording()), PlayingAndRecording()),
+            Plan(Idle(), Recording()));
+
+  TransitionPlan plan = PlanDeviceTransition({RebuildBaseline(Playing()), Playing()});
+  EXPECT_FALSE(plan.stop_engine);
+  EXPECT_FALSE(plan.release_engine);
+  EXPECT_FALSE(plan.final_release);
+  EXPECT_TRUE(plan.create_engine);
+  EXPECT_TRUE(plan.will_enable);
+  EXPECT_TRUE(plan.start_engine);
+}
+
+TEST(AudioEngineStateTest, StopWhileRebuildPendingTouchesNoEngine) {
+  TransitionPlan plan = PlanDeviceTransition({RebuildBaseline(Playing()), Idle()});
+  EXPECT_FALSE(plan.stop_engine);
+  EXPECT_FALSE(plan.did_disable);
+  EXPECT_FALSE(plan.final_release);
+  EXPECT_FALSE(plan.create_engine);
+}
+
+TEST(AudioEngineStateTest, RebuildToAnotherDeviceStartsFromNothing) {
+  EngineState next = Playing();
+  next.output_device_id = 7;
+  TransitionPlan plan = PlanDeviceTransition({RebuildBaseline(Playing()), next});
+  // The device change still counts as a recreate, but there is no engine to
+  // release. ApplyDeviceEngineState skips the release without an engine.
+  EXPECT_TRUE(plan.release_engine);
+  EXPECT_FALSE(plan.stop_engine);
+  EXPECT_TRUE(plan.create_engine);
+  EXPECT_TRUE(plan.will_enable);
+}
+
 }  // namespace
 }  // namespace audio_engine
 }  // namespace webrtc
