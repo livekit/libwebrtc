@@ -2615,6 +2615,22 @@ TEST_F(SendStatisticsProxyTest, GetStatsReportsIsFlexFec) {
   EXPECT_EQ(GetStreamStats(kFlexFecSsrc).referenced_media_ssrc, kFirstSsrc);
 }
 
+TEST_F(SendStatisticsProxyTest, FlexFecWithoutSsrcIsNotReportedForUnknownSsrc) {
+  // A simulcast stream negotiates FlexFEC but is assigned no FlexFEC SSRC.
+  VideoSendStream::Config config = GetTestConfig();
+  config.rtp.flexfec.payload_type = 50;
+  statistics_proxy_.reset(new SendStatisticsProxy(
+      &fake_clock_, config, VideoEncoderConfig::ContentType::kRealtimeVideo,
+      field_trials_));
+
+  // RTCP counters are reported for the remote SSRC, which is 0 until known.
+  RtcpPacketTypeCounterObserver* rtcp_proxy =
+      static_cast<RtcpPacketTypeCounterObserver*>(statistics_proxy_.get());
+  rtcp_proxy->RtcpPacketTypesCounterUpdated(0, RtcpPacketTypeCounter());
+
+  EXPECT_EQ(statistics_proxy_->GetStats().substreams.count(0), 0u);
+}
+
 TEST_F(SendStatisticsProxyTest, SendBitratesAreReportedWithFlexFecEnabled) {
   statistics_proxy_.reset(new SendStatisticsProxy(
       &fake_clock_, GetTestConfigWithFlexFec(),

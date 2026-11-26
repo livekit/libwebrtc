@@ -919,8 +919,7 @@ VideoSendStream::StreamStats* SendStatisticsProxy::GetStatsEntry(
     return &it->second;
 
   bool is_media = rtp_config_.IsMediaSsrc(ssrc);
-  bool is_flexfec = rtp_config_.flexfec.payload_type != -1 &&
-                    ssrc == rtp_config_.flexfec.ssrc;
+  bool is_flexfec = rtp_config_.IsFlexfecSsrc(ssrc);
   bool is_rtx = rtp_config_.IsRtxSsrc(ssrc);
   if (!is_media && !is_flexfec && !is_rtx)
     return nullptr;

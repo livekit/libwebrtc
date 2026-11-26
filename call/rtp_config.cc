@@ -184,7 +184,11 @@ bool RtpConfig::IsRtxSsrc(uint32_t ssrc) const {
 }
 
 bool RtpConfig::IsFlexfecSsrc(uint32_t ssrc) const {
-  return flexfec.payload_type != -1 && ssrc == flexfec.ssrc;
+  // FlexFEC can be negotiated for a stream that gets no FlexFEC SSRC, e.g. a
+  // simulcast stream. Its unset `flexfec.ssrc` of 0 must not match an unknown
+  // SSRC, which is also 0 before the remote SSRC is known.
+  return flexfec.payload_type != -1 && !flexfec.protected_media_ssrcs.empty() &&
+         ssrc == flexfec.ssrc;
 }
 
 std::optional<uint32_t> RtpConfig::GetRtxSsrcAssociatedWithMediaSsrc(
