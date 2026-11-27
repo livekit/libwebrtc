@@ -92,8 +92,8 @@ class ChannelReceiveTest : public Test {
 
   uint32_t RtpNow() {
     // Note - the "random" offset of this timestamp is zero.
-    return time_controller_.GetClock()->TimeInMilliseconds() * 1000 /
-           kSampleRateHz;
+    return time_controller_.GetClock()->TimeInMilliseconds() * kSampleRateHz /
+           1000;
   }
 
   RtpPacketReceived CreateRtpPacket() {
@@ -241,6 +241,50 @@ TEST_F(ChannelReceiveTest, CaptureStartTimeBecomesValid) {
   channel->ReceivedRTCPPacket(rtcp_packet_2.data(), rtcp_packet_2.size());
 
   EXPECT_NE(ProbeCaptureStartNtpTime(*channel), -1);
+}
+
+TEST_F(ChannelReceiveTest, AudioOnlyPlayoutNtpDoesNotRequireVideoOrRtt) {
+  auto channel = CreateTestChannelReceive();
+  ON_CALL(*audio_device_module_, PlayoutDelay)
+      .WillByDefault(
+          ::testing::DoAll(::testing::SetArgPointee<0>(40), Return(0)));
+  channel->StartPlayout();
+  auto* clock = time_controller_.GetClock();
+  for (int frame = 0; frame < 160; ++frame) {
+    auto packet = CreateRtpPacket();
+    packet.SetSsrc(kRemoteSsrc);
+    packet.SetSequenceNumber(frame);
+    packet.SetPayloadSize(kSampleRateHz / 100);
+    channel->OnRtpPacket(packet);
+    if (frame == 10 || frame == 110) {
+      const auto report = CreateRtcpSenderReport();
+      channel->ReceivedRTCPPacket(report.data(), report.size());
+    }
+    AudioFrame output;
+    channel->GetAudioFrameWithInfo(kSampleRateHz, &output);
+    if (frame == 9) {
+      EXPECT_FALSE(channel->GetCurrentEstimatedPlayoutNtpTimestampMs(
+          clock->TimeInMilliseconds()));
+    }
+    // Check the output delay after one report and again after two.
+    if (frame == 20 || frame == 150) {
+      const auto estimate = channel->GetCurrentEstimatedPlayoutNtpTimestampMs(
+          clock->TimeInMilliseconds());
+      ASSERT_TRUE(estimate);
+      EXPECT_GT(NtpNow().ToMs() - *estimate, 30);
+      EXPECT_LT(NtpNow().ToMs() - *estimate, 150);
+    }
+    time_controller_.AdvanceTime(TimeDelta::Millis(10));
+  }
+
+  // An estimate from the A/V synchronizer still takes precedence.
+  const NtpTime synced(100, 0);
+  channel->SetEstimatedPlayoutNtpTimestamp(synced, clock->CurrentTime());
+  time_controller_.AdvanceTime(TimeDelta::Millis(10));
+  EXPECT_EQ(channel->GetCurrentEstimatedPlayoutNtpTimestampMs(
+                clock->TimeInMilliseconds()),
+            synced.ToMs() + 10);
+  channel->StopPlayout();
 }
 
 TEST_F(ChannelReceiveTest, SettingFrameTransformer) {

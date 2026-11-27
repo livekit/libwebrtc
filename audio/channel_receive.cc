@@ -78,6 +78,7 @@
 #include "rtc_base/numerics/safe_conversions.h"
 #include "rtc_base/numerics/sequence_number_unwrapper.h"
 #include "rtc_base/race_checker.h"
+#include "rtc_base/rtp_to_ntp_estimator.h"
 #include "rtc_base/strings/string_builder.h"
 #include "rtc_base/synchronization/mutex.h"
 #include "rtc_base/system/no_unique_address.h"
@@ -302,6 +303,8 @@ class ChannelReceive : public ChannelReceiveInterface,
   AudioLevel output_audio_level_;
 
   RemoteNtpTimeEstimator ntp_estimator_ RTC_GUARDED_BY(ts_stats_lock_);
+  RtpToNtpEstimator playout_ntp_estimator_
+      RTC_GUARDED_BY(worker_thread_checker_);
 
   // Timestamp of the audio pulled from NetEq.
   std::optional<uint32_t> jitter_buffer_playout_timestamp_;
@@ -801,16 +804,18 @@ void ChannelReceive::ReceivedRTCPPacket(const uint8_t* data, size_t length) {
   // Deliver RTCP packet to RTP/RTCP module for parsing
   rtp_rtcp_->IncomingRtcpPacket(std::span(data, length));
 
-  std::optional<TimeDelta> rtt = rtp_rtcp_->LastRtt();
-  if (!rtt.has_value()) {
-    // Waiting for valid RTT.
-    return;
-  }
-
   std::optional<RtpRtcpInterface::SenderReportStats> last_sr =
       rtp_rtcp_->GetSenderReportStats();
   if (!last_sr.has_value()) {
     // Waiting for RTCP.
+    return;
+  }
+
+  // Mapping the remote RTP clock to sender time does not require an RTT.
+  playout_ntp_estimator_.UpdateMeasurements(last_sr->last_remote_ntp_timestamp,
+                                            last_sr->last_remote_rtp_timestamp);
+  std::optional<TimeDelta> rtt = rtp_rtcp_->LastRtt();
+  if (!rtt.has_value()) {
     return;
   }
 
@@ -1092,11 +1097,36 @@ void ChannelReceive::SetEstimatedPlayoutNtpTimestamp(NtpTime ntp_time,
 std::optional<int64_t> ChannelReceive::GetCurrentEstimatedPlayoutNtpTimestampMs(
     int64_t now_ms) const {
   RTC_DCHECK_RUN_ON(&worker_thread_checker_);
-  if (!playout_timestamp_ntp_ || !playout_timestamp_ntp_time_)
-    return std::nullopt;
+  if (playout_timestamp_ntp_ && playout_timestamp_ntp_time_) {
+    return playout_timestamp_ntp_->ToMs() +
+           (now_ms - playout_timestamp_ntp_time_->ms());
+  }
 
-  int64_t elapsed_ms = now_ms - playout_timestamp_ntp_time_->ms();
-  return playout_timestamp_ntp_->ToMs() + elapsed_ms;
+  // Audio-only streams have no video synchronizer to set a playout time.
+  if (!playing_ || !playout_timestamp_) {
+    return std::nullopt;
+  }
+  const int64_t elapsed_ms = now_ms - playout_timestamp_->time.ms();
+  const uint32_t playout_rtp = playout_timestamp_->rtp_timestamp;
+  const NtpTime estimate = playout_ntp_estimator_.Estimate(playout_rtp);
+  if (estimate.Valid()) {
+    return estimate.ToMs() + elapsed_ms;
+  }
+
+  // Until two reports establish the clock rate, use the codec rate and a
+  // nearby sender report. The RTP clock can wrap between the two samples.
+  const auto report = rtp_rtcp_->GetSenderReportStats();
+  if (!report || !report->last_remote_ntp_timestamp.Valid()) {
+    return std::nullopt;
+  }
+  const int64_t rate_hz = GetRtpTimestampRateHz();
+  const int64_t ticks =
+      static_cast<int32_t>(playout_rtp - report->last_remote_rtp_timestamp);
+  if (rate_hz <= 0 || ticks < -60 * rate_hz || ticks > 60 * rate_hz) {
+    return std::nullopt;
+  }
+  return report->last_remote_ntp_timestamp.ToMs() + ticks * 1000 / rate_hz +
+         elapsed_ms;
 }
 
 bool ChannelReceive::SetBaseMinimumPlayoutDelayMs(int delay_ms) {
